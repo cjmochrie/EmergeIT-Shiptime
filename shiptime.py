@@ -10,9 +10,8 @@ class Shiptime:
     """
     def __init__(self, encrypted_password='2A27C164EA2499506FB0CD628AB7B083',
                  encrypted_username='20AE2D8B660FB10B1F4625BB77FCAE3C3EA33586F2DDA2A1EB3349881952AC23', sandbox=True,
-                 country=None, notify=False, postal_code=None, residential=False, province=None, attention=None,
-                 city=None, company_name=None, phone=None, street_address=None, email=None, instructions=None,
-                 street_address2=None):
+                 street_address2=None, notify=False, instructions=None, residential=False, email=None, *, country,
+                 postal_code, province, attention, city, company_name, phone, street_address):
 
         """Instance is initialized along with sender information"""
         """Default username/password for the sanbbox server"""
@@ -24,23 +23,6 @@ class Shiptime:
 
         self.encrypted_password = encrypted_password
         self.encrypted_username = encrypted_username
-
-        if not country:
-            raise TypeError('Country code required')
-        if not postal_code:
-            raise TypeError('Postal code required')
-        if not province:
-            raise TypeError('Province required')
-        if not attention:
-            raise TypeError('Attention required')
-        if not city:
-            raise TypeError('City required')
-        if not company_name:
-            raise TypeError('Company Name required')
-        if not phone:
-            raise TypeError('Phone # required')
-        if not street_address:
-            raise TypeError('Street Address required')
 
         self.country = country.upper()
         self.notify = notify
@@ -57,9 +39,9 @@ class Shiptime:
         self.instructions = instructions
         self.street_address2 = street_address2
 
-    def get_rates(self, items=None, package_type=None, country=None, notify=False, postal_code=None, residential=False,
-                  province=None, attention=None, city=None, company_name=None, phone=None, street_address=None, email=None,
-                  instructions=None, street_address2=None, signature=None, saturday_service=None):
+    def get_rates(self, residential=False, notify=False, email=None, instructions=None, street_address2=None,
+                  signature=None, saturday_service=None, *, items, package_type, country, postal_code, province,
+                  attention, city, company_name, phone, street_address):
         """Requires a list of dictionaries for items_tag (height, length, width, weight in Inches and lbs respectively
         Returns a dictionary of two lists:
         'messages'
@@ -67,25 +49,7 @@ class Shiptime:
         If any messages are 'errors' no rates will be returned.
         """
         if not items:
-            raise TypeError('Items code required')
-        if not package_type:
-            raise TypeError('Package type required')
-        if not country:
-            raise TypeError('Country code required')
-        if not postal_code:
-            raise TypeError('Postal code required')
-        if not province:
-            raise TypeError('Province required')
-        if not attention:
-            raise TypeError('Attention required')
-        if not city:
-            raise TypeError('City required')
-        if not company_name:
-            raise TypeError('Company Name required')
-        if not phone:
-            raise TypeError('Phone # required')
-        if not street_address:
-            raise TypeError('Street Address required')
+            raise TypeError('Items dictionary required')
 
         # Build the XML Request
         root = ET.Element('S:Envelope', attrib={'xmlns:S' : 'http://schemas.xmlsoap.org/soap/envelope/'})
