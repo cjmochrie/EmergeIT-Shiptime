@@ -1,7 +1,18 @@
 import xml.etree.ElementTree as ET
+import logging
+import re
+
 import requests
 import xmltodict
 from decimal import *
+from operator import itemgetter
+
+logging.basicConfig()  # you need to initialize logging, otherwise you will not see anything from requests
+logging.getLogger().setLevel(logging.DEBUG)
+requests_log = logging.getLogger("requests.packages.urllib3")
+requests_log.setLevel(logging.DEBUG)
+requests_log.propagate = True
+
 
 class Shiptime:
     """Class for interacting with the Shiptime SOAP API
@@ -40,21 +51,21 @@ class Shiptime:
         self.street_address2 = street_address2
 
     def get_rates(self, residential=False, notify=False, email=None, instructions=None, street_address2=None,
-                  signature=None, saturday_service=None, *, items, package_type, country, postal_code, province,
-                  attention, city, company_name, phone, street_address):
+                  signature=None, saturday_service=None, retry=False, *, items, package_type, country, postal_code,
+                  province, attention, city, company_name, phone, street_address):
         """Requires a list of dictionaries for items_tag (height, length, width, weight in Inches and lbs respectively
         Returns a dictionary of two lists:
         'messages'
-        'rates'
+        'rates' - sorted ascending by total_before_tax
         If any messages are 'errors' no rates will be returned.
         """
         if not items:
             raise TypeError('Items dictionary required')
 
         # Build the XML Request
-        root = ET.Element('S:Envelope', attrib={'xmlns:S' : 'http://schemas.xmlsoap.org/soap/envelope/'})
+        root = ET.Element('S:Envelope', attrib={'xmlns:S': 'http://schemas.xmlsoap.org/soap/envelope/'})
         body = ET.SubElement(root, 'S:Body')
-        rates = ET.SubElement(body, 'ns2:getRates', attrib={'xmlns:ns2' : 'http://v1.api.emergeit.com/'})
+        rates = ET.SubElement(body, 'ns2:getRates', attrib={'xmlns:ns2': 'http://v1.api.emergeit.com/'})
         key = ET.SubElement(rates, 'Key')
         ET.SubElement(key, 'EncryptedPassword').text = self.encrypted_password
         ET.SubElement(key, 'EncryptedUsername').text = self.encrypted_username
@@ -84,7 +95,8 @@ class Shiptime:
             try:
                 height = ET.SubElement(item_tag, 'Height')
                 ET.SubElement(height, 'UnitsType').text = 'IN'
-                ET.SubElement(height, 'Value').text = str(round(Decimal(item['height']) + Decimal(0.5), 0))
+                ET.SubElement(height, 'Value').text = str(round(Decimal(item['height']) + Decimal(
+                    0.5), 0))
             except KeyError:
                 raise KeyError('Key Error on height')
             try:
@@ -136,18 +148,20 @@ class Shiptime:
         xml = ET.tostring(root)
 
         # Make the request
-        response = requests.post(self.url, data=xml)
-        #print(response.text)
+        print('Right before shiptime request')
+        response = requests.post(self.url, data=xml, timeout=7)
+        print('Right after shiptime request')
+        response.raise_for_status()
 
         # Ignore namespace information
-        namespaces = {'http://schemas.xmlsoap.org/soap/envelope/' : None,
-                      "http://v1.api.emergeit.com/" : None}
+        namespaces = {'http://schemas.xmlsoap.org/soap/envelope/': None,
+                      "http://v1.api.emergeit.com/": None}
 
         # Parse the response into a dictionary
         response_dict = xmltodict.parse(response.text, process_namespaces=True, namespaces=namespaces)
 
         # Dictionary to hold the processed results
-        shiptime_response = {'messages' : [], 'rates' : []}
+        shiptime_response = {'messages': [], 'rates': []}
 
         # Extract messages and process
         messages = response_dict['Envelope']['Body']['getRatesResponse']['Response']['Messages']
@@ -156,34 +170,59 @@ class Shiptime:
             # Because of the way the xml is parsed need to treat singleton messages differently
             # Essentially a single message is a dict inside a dict, whereas multiple messages are dicts inside lists
             # inside dicts
-            if type(messages['Message']) != type([]):
-                shiptime_response['messages'].append({'severity' : messages['Message']['Severity'],
-                                                      'text' : messages['Message']['Text']})
+            if not isinstance(messages['Message'], list):
+                shiptime_response['messages'].append({'severity': messages['Message']['Severity'],
+                                                      'text': messages['Message']['Text']})
             else:
                 for message in messages['Message']:
                     print(message)
-                    shiptime_response['messages'].append({'severity' : message['Severity'], 'text' : message['Text']})
+                    shiptime_response['messages'].append({'severity': message['Severity'], 'text': message['Text']})
 
-            # Bail out if an error message is returned
+        # Do a check to see if there was an error about postal codes.
+        # If there was (and this is not a retry), redo the request with the suggested city
+        if not retry:
             for message in shiptime_response['messages']:
-                if message['severity'] == 'ERROR':
-                    return shiptime_response
+                if message['text'].startswith('Postal Code'):
+
+                    corrected_city = re.findall(r"only valid for ([^,]*)", message['text'])[0]
+                    print('Retrying shiptime API. Replacing {} with {}'.format(city, corrected_city))
+
+                    return self.get_rates(residential=residential, notify=notify, email=email,
+                                          instructions=instructions, street_address2=street_address2,
+                                          signature=signature, saturday_service=saturday_service, retry=True,
+                                          items=items, package_type=package_type, country=country,
+                                          postal_code=postal_code, province=province, attention=attention,
+                                          city=corrected_city, company_name=company_name, phone=phone,
+                                          street_address=street_address)
+        else:
+            # Add a message that the city was modified (only reason we are here is this is a 'retry'
+            shiptime_response['messages'].append({'severity': 'Warning',
+                                                  'text': 'City was changed to {}.'.format(city)})
+
+        # Bail out if an error message is returned
+        for message in shiptime_response['messages']:
+            if message['severity'] == 'ERROR':
+                return shiptime_response
 
         # Extract rates and process
         available_rates = response_dict['Envelope']['Body']['getRatesResponse']['Response']['AvailableRates']
 
         if available_rates:
             # Same reasoning per the above
-            if type(available_rates['Rate']) != type([]):
-                shiptime_response['rates'].append({'service_name' : available_rates['Rate']['ServiceName'],
-                                        'total_after_tax' : Decimal(available_rates['Rate']['TotalCharge']['Amount'])/100,
-                                        'transit_time' : int(available_rates['Rate']['TransitDays'])})
+            if not isinstance(available_rates['Rate'], list):
+                shiptime_response['rates'].append({'service_name': available_rates['Rate']['ServiceName'],
+                                        'total_before_tax': Decimal(available_rates['Rate']['TotalBeforeTaxes']['Amount'])/100,
+                                        'transit_time': int(available_rates['Rate']['TransitDays'])})
 
             else:
                 for rate in available_rates['Rate']:
-                    shiptime_response['rates'].append({'service_name' : rate['ServiceName'],
-                                            'total_after_tax' : Decimal(rate['TotalCharge']['Amount'])/100,
-                                            'transit_time' : int(rate['TransitDays'])})
+                    shiptime_response['rates'].append({'service_name': rate['ServiceName'],
+                                                       'total_before_tax': Decimal(rate['TotalBeforeTaxes'][
+                                                                                       'Amount'])/100,
+                                                       'transit_time': int(rate['TransitDays'])})
+
+            # Sort the rates ascending
+            shiptime_response['rates'].sort(key=itemgetter('total_before_tax'))
 
         return shiptime_response
 
@@ -195,11 +234,11 @@ if __name__ == '__main__':
     shipper = Shiptime(country='CA', postal_code='M9A4M5', province='ON', attention='Attention name', city='Etobicoke',
                        company_name='Origin Company', phone='123-456-7890', street_address='Address 1')
 
-
-    response = shipper.get_rates(items=[{'height' : 3, 'length' : 5, 'width' : 4, 'weight' : 2}], package_type='PACKAGE',
-                                 country='CA', postal_code='M2M2M2', residential=False, province='ON',
-                                 attention='Attention name', city='North York', company_name='Test Company', phone='123-456-7890',
-                                 street_address='Address 1')
+    response = shipper.get_rates(items=[{'height': 3, 'length': 5, 'width': 4, 'weight': 2},
+                                        {'height': 3, 'length': 5, 'width': 4, 'weight': 2}],
+                                 package_type='PACKAGE', country='CA', postal_code='M2M2M2', residential=False,
+                                 province='ON', attention='Attention name', city='North York',
+                                 company_name='Test Company', phone='123-456-7890', street_address='Address 1')
 
     for message in response['messages']:
         print(message)
